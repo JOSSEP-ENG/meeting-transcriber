@@ -13,8 +13,8 @@ google-auth==2.35.0
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.1
 
-# Whisper (OpenAI)
-openai==1.45.0
+# Google Cloud Speech-to-Text
+google-cloud-speech==2.33.0
 
 # Utility
 python-multipart==0.0.9

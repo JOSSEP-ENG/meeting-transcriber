@@ -11,7 +11,6 @@ load_dotenv(dotenv_path=env_path)
 
 
 class Settings(BaseSettings):
-    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     google_application_credentials: str = Field(default="", alias="GOOGLE_APPLICATION_CREDENTIALS")
     google_sheet_id: str = Field(default="", alias="GOOGLE_SHEET_ID")
     app_port: int = Field(default=8000, alias="APP_PORT")
