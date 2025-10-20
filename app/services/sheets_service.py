@@ -132,6 +132,59 @@ class GoogleSheetsService:
         except Exception as e:
             raise Exception(f"시트 레코드 조회 실패: {str(e)}")
 
+    async def get_headers(self) -> List[str]:
+        """
+        시트의 헤더 행 조회 (디버깅용)
+
+        Returns:
+            헤더 리스트
+
+        Raises:
+            Exception: API 호출 실패 시
+        """
+        try:
+            service = self._get_service()
+            result = (
+                service.spreadsheets()
+                .values()
+                .get(spreadsheetId=self.sheet_id, range="A1:Z1")
+                .execute()
+            )
+
+            values = result.get("values", [[]])[0]
+            return values
+
+        except Exception as e:
+            raise Exception(f"시트 헤더 조회 실패: {str(e)}")
+
+    async def clear_and_reinitialize(self) -> None:
+        """
+        시트를 완전히 클리어하고 헤더를 다시 생성
+
+        Raises:
+            Exception: API 호출 실패 시
+        """
+        try:
+            service = self._get_service()
+
+            # 시트 전체 클리어
+            service.spreadsheets().values().clear(
+                spreadsheetId=self.sheet_id,
+                range="A:Z"
+            ).execute()
+
+            # 헤더 생성
+            headers = [["시각", "화자", "녹취 내용", "회의 제목"]]
+            service.spreadsheets().values().update(
+                spreadsheetId=self.sheet_id,
+                range="A1:D1",
+                valueInputOption="RAW",
+                body={"values": headers},
+            ).execute()
+
+        except Exception as e:
+            raise Exception(f"시트 클리어 및 초기화 실패: {str(e)}")
+
 
 # 싱글톤 인스턴스
 sheets_service = GoogleSheetsService()

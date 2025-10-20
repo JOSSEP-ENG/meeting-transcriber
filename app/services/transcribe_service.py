@@ -57,19 +57,28 @@ class TranscribeService:
             language_code = language_code_map.get(language, f"{language}-KR")
 
             # 오디오 인코딩 설정
-            # MP3, M4A 등 압축 형식은 ENCODING_UNSPECIFIED 사용
+            # MP3 파일은 LINEAR16 인코딩으로 처리하거나 sample_rate 지정 필요
+            # 짧은 오디오의 경우 recognize 메서드 사용
+            # 긴 오디오의 경우 long_running_recognize 사용 고려
             config = speech.RecognitionConfig(
                 encoding=speech.RecognitionConfig.AudioEncoding.MP3,
+                # sample_rate_hertz=16000,  # MP3는 자동 감지됨
                 language_code=language_code,
-                enable_automatic_punctuation=True,  # 자동 문장부호
+                enable_automatic_punctuation=True,  # 자동 문장 부호
                 model="default",  # 기본 모델
+                # audio_channel_count=1,  # 모노 채널
             )
 
             # 음성 인식 수행
             response = client.recognize(config=config, audio=audio)
 
+            # 디버깅: 응답 확인
+            print(f"DEBUG: Speech API response received")
+            print(f"DEBUG: Number of results: {len(response.results)}")
+
             # 결과 추출
             if not response.results:
+                print("DEBUG: No results from Speech API")
                 return ""
 
             # 모든 결과를 합쳐서 반환
@@ -77,9 +86,11 @@ class TranscribeService:
                 [result.alternatives[0].transcript for result in response.results]
             )
 
+            print(f"DEBUG: Transcription: {transcript}")
             return transcript
 
         except Exception as e:
+            print(f"DEBUG: Exception occurred: {str(e)}")
             raise Exception(f"음성 인식 실패: {str(e)}")
 
 

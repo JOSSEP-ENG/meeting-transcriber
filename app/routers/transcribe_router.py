@@ -113,3 +113,33 @@ async def initialize_sheet():
         return {"success": True, "message": "시트가 초기화되었습니다."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"시트 초기화 실패: {str(e)}")
+
+
+@router.get("/debug-headers")
+async def debug_headers():
+    """
+    시트 헤더 확인 (디버깅용)
+
+    Returns:
+        헤더 정보
+    """
+    try:
+        headers = await sheets_service.get_headers()
+        return {"success": True, "headers": headers}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"헤더 조회 실패: {str(e)}")
+
+
+@router.post("/clear-sheet")
+async def clear_sheet():
+    """
+    시트를 완전히 클리어하고 헤더 재생성
+
+    Returns:
+        초기화 결과
+    """
+    try:
+        await sheets_service.clear_and_reinitialize()
+        return {"success": True, "message": "시트가 클리어되고 헤더가 재생성되었습니다."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"시트 클리어 실패: {str(e)}")
