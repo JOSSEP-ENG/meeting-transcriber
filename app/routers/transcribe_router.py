@@ -48,9 +48,9 @@ async def upload_and_transcribe(
                 detail=f"지원하지 않는 파일 형식입니다: {audio_file.filename}",
             )
 
-        # 2. 음성 인식 (Whisper API)
+        # 2. 음성 인식 (Google Speech-to-Text API)
         transcription = await transcribe_service.transcribe_audio(
-            audio_file.file, language=language
+            audio_file.file, language=language, filename=audio_file.filename
         )
 
         # 3. 화자 이름 설정
