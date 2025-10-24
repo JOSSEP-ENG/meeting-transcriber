@@ -18,3 +18,10 @@ google-cloud-speech==2.33.0
 
 # Utility
 python-multipart==0.0.9
+
+# Audio processing
+librosa==0.10.2
+soundfile==0.12.1
+
+# WebSocket support
+websockets==12.0
