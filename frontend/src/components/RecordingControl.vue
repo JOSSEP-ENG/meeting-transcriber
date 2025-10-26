@@ -86,8 +86,14 @@
 
       <!-- 완료 결과 표시 -->
       <div v-if="completedData" class="result-section">
-        <h3>회의 저장 완료!</h3>
-        <p><strong>시트 행 번호:</strong> {{ completedData.sheet_row }}</p>
+        <h3>✅ 회의 저장 완료!</h3>
+        <div class="sheet-link-container">
+          <p><strong>생성된 시트:</strong></p>
+          <a :href="completedData.sheet_link" target="_blank" class="sheet-link">
+            📄 Google Sheets에서 열기
+          </a>
+        </div>
+        <p><strong>녹취 개수:</strong> {{ completedData.transcription_count }}개</p>
         <div class="transcription-result">
           <h4>전체 녹취록:</h4>
           <p>{{ completedData.transcription }}</p>
@@ -505,6 +511,33 @@ h1 {
 .result-section h3 {
   color: #2e7d32;
   margin-bottom: 1rem;
+  text-align: center;
+}
+
+.sheet-link-container {
+  margin: 1rem 0;
+  padding: 1rem;
+  background: white;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.sheet-link {
+  display: inline-block;
+  margin-top: 0.5rem;
+  padding: 0.75rem 1.5rem;
+  background: linear-gradient(135deg, #4285f4 0%, #34a853 100%);
+  color: white;
+  text-decoration: none;
+  border-radius: 8px;
+  font-weight: 600;
+  transition: all 0.3s;
+  box-shadow: 0 2px 8px rgba(66, 133, 244, 0.3);
+}
+
+.sheet-link:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(66, 133, 244, 0.5);
 }
 
 .transcription-result {

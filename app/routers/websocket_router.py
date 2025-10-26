@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import datetime
 from typing import Dict
@@ -8,6 +9,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.config.settings import settings
 from app.models.transcribe import SheetRecord
 from app.services.sheets_service import sheets_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ws", tags=["WebSocket"])
 
@@ -37,7 +40,8 @@ async def websocket_record(websocket: WebSocket):
     """
     await websocket.accept()
     session_id = str(uuid.uuid4())
-    print(f"WebSocket 연결됨: session_id={session_id}")
+    import sys
+    print(f"[VERSION 2.0] WebSocket 연결됨: session_id={session_id}", file=sys.stderr, flush=True)
 
     # 세션 데이터 초기화
     session = {
@@ -48,6 +52,10 @@ async def websocket_record(websocket: WebSocket):
         "transcription_parts": [],  # 실시간으로 받은 텍스트 조각들
         "start_time": None,
         "audio_buffer": [],  # 오디오 청크 버퍼
+        "sheet_id": None,  # 템플릿 시트 ID (파일 ID)
+        "tab_id": None,  # 생성된 탭 ID
+        "tab_name": None,  # 생성된 탭 이름
+        "sheet_link": None,  # 탭 링크
     }
     active_sessions[session_id] = session
 
@@ -62,20 +70,57 @@ async def websocket_record(websocket: WebSocket):
                 # 녹음 시작
                 session["language"] = data.get("language", "ko")
                 session["speaker"] = data.get("speaker", settings.default_speaker)
-                session["meeting_title"] = data.get("meeting_title")
+                session["meeting_title"] = data.get("meeting_title", "제목없음")
                 session["start_time"] = datetime.now()
 
-                print(
+                logger.info(
                     f"녹음 시작: session_id={session_id}, "
                     f"speaker={session['speaker']}, "
-                    f"language={session['language']}"
+                    f"language={session['language']}, "
+                    f"meeting_title={session['meeting_title']}"
                 )
 
-                await websocket.send_json({
-                    "type": "status",
-                    "message": "녹음이 시작되었습니다",
-                    "session_id": session_id,
-                })
+                # 템플릿 기반 회의록 시트 생성
+                try:
+                    meeting_date = session["start_time"].strftime("%Y-%m-%d")
+                    meeting_time_start = session["start_time"].strftime("%H:%M")
+
+                    import sys
+                    print(f"DEBUG: Creating meeting sheet - title={session['meeting_title']}, date={meeting_date}", file=sys.stderr, flush=True)
+
+                    sheet_info = await sheets_service.create_meeting_sheet(
+                        meeting_title=session["meeting_title"],
+                        meeting_date=meeting_date,
+                        meeting_time=meeting_time_start  # 시작 시간만 우선 기록
+                    )
+
+                    session["sheet_id"] = sheet_info["file_id"]
+                    session["tab_id"] = sheet_info.get("tab_id")
+                    session["tab_name"] = sheet_info.get("tab_name")
+                    session["sheet_link"] = sheet_info["web_link"]
+
+                    logger.info(f"SUCCESS: Sheet created - ID={session['sheet_id']}, Link={session['sheet_link']}")
+
+                    response_data = {
+                        "type": "status",
+                        "message": "녹음이 시작되었습니다",
+                        "session_id": session_id,
+                        "sheet_id": session["sheet_id"],
+                        "sheet_link": session["sheet_link"],
+                    }
+                    logger.info(f"Sending response: {response_data}")
+                    await websocket.send_json(response_data)
+
+                except Exception as e:
+                    import traceback
+                    error_details = traceback.format_exc()
+                    logger.error(f"ERROR: Sheet creation failed")
+                    logger.error(f"ERROR: {str(e)}")
+                    logger.error(f"TRACEBACK: {error_details}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"시트 생성 실패: {str(e)}",
+                    })
 
             elif message_type == "audio":
                 # 오디오 청크 수신
@@ -90,18 +135,34 @@ async def websocket_record(websocket: WebSocket):
                 # 클라이언트가 직접 변환한 텍스트를 전송하는 경우
                 # (브라우저의 Web Speech API 등 사용 시)
                 text = data.get("text", "").strip()
-                if text:
+                if text and session.get("sheet_id") and session.get("tab_name"):
                     session["transcription_parts"].append(text)
                     print(f"텍스트 수신: session_id={session_id}, text={text}")
 
-                    # 클라이언트에 확인 전송
-                    await websocket.send_json({
-                        "type": "transcription_received",
-                        "text": text,
-                    })
+                    # 실시간으로 시트에 기록 (C13부터)
+                    try:
+                        row_number = await sheets_service.append_transcription_to_sheet(
+                            sheet_id=session["sheet_id"],
+                            tab_name=session["tab_name"],
+                            transcription=text
+                        )
+
+                        # 클라이언트에 확인 전송
+                        await websocket.send_json({
+                            "type": "transcription_received",
+                            "text": text,
+                            "row": row_number,
+                        })
+
+                    except Exception as e:
+                        print(f"실시간 녹취 기록 실패: {str(e)}")
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"녹취 기록 실패: {str(e)}",
+                        })
 
             elif message_type == "end":
-                # 녹음 종료 및 저장
+                # 녹음 종료
                 print(f"녹음 종료: session_id={session_id}")
 
                 # 전체 텍스트 병합
@@ -114,33 +175,17 @@ async def websocket_record(websocket: WebSocket):
                     })
                     continue
 
-                # Google Sheets에 저장
-                now = datetime.now()
-                sheet_record = SheetRecord(
-                    timestamp=now.strftime("%Y-%m-%d %H:%M:%S"),
-                    speaker=session["speaker"],
-                    transcription=full_transcription,
-                    meeting_title=session["meeting_title"],
-                )
+                # 이미 실시간으로 C13부터 기록되었으므로 완료 메시지만 전송
+                await websocket.send_json({
+                    "type": "completed",
+                    "message": "회의 내용이 성공적으로 저장되었습니다",
+                    "sheet_id": session.get("sheet_id"),
+                    "sheet_link": session.get("sheet_link"),
+                    "transcription": full_transcription,
+                    "transcription_count": len(session["transcription_parts"]),
+                })
 
-                try:
-                    row_number = await sheets_service.append_record(sheet_record)
-
-                    await websocket.send_json({
-                        "type": "completed",
-                        "message": "회의 내용이 성공적으로 저장되었습니다",
-                        "sheet_row": row_number,
-                        "transcription": full_transcription,
-                    })
-
-                    print(f"시트에 저장 완료: session_id={session_id}, row={row_number}")
-
-                except Exception as e:
-                    print(f"시트 저장 실패: {str(e)}")
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": f"저장 실패: {str(e)}",
-                    })
+                print(f"회의 종료 완료: session_id={session_id}, sheet={session.get('sheet_id')}")
 
                 # 세션 정리
                 session["transcription_parts"].clear()
