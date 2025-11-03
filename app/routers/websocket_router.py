@@ -1,6 +1,7 @@
 import json
 import logging
 import uuid
+import base64
 from datetime import datetime
 from typing import Dict
 
@@ -9,6 +10,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.config.settings import settings
 from app.models.transcribe import SheetRecord
 from app.services.sheets_service import sheets_service
+from app.services.speech_service import speech_service
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,14 @@ router = APIRouter(prefix="/ws", tags=["WebSocket"])
 
 # 활성 세션 관리
 active_sessions: Dict[str, dict] = {}
+
+
+@router.websocket("/test")
+async def websocket_test(websocket: WebSocket):
+    """Simple test endpoint"""
+    await websocket.accept()
+    await websocket.send_json({"message": "Test connection successful"})
+    await websocket.close()
 
 
 @router.websocket("/record")
@@ -46,16 +56,26 @@ async def websocket_record(websocket: WebSocket):
     # 세션 데이터 초기화
     session = {
         "session_id": session_id,
-        "language": "ko",
+        "language": "ko-KR",
         "speaker": settings.default_speaker,
         "meeting_title": None,
         "transcription_parts": [],  # 실시간으로 받은 텍스트 조각들
         "start_time": None,
-        "audio_buffer": [],  # 오디오 청크 버퍼
         "sheet_id": None,  # 템플릿 시트 ID (파일 ID)
         "tab_id": None,  # 생성된 탭 ID
         "tab_name": None,  # 생성된 탭 이름
         "sheet_link": None,  # 탭 링크
+
+        # 화자 관련 추가
+        "participant_names": [],  # 참석자 명단 ["홍길동", "김철수"]
+        "speaker_mapping": {},  # {1: "홍길동", 2: "김철수"}
+        "last_speaker_id": None,  # 마지막 화자 Speaker ID
+        "last_speaker_name": None,  # 마지막 화자 이름
+        "unmapped_speakers": set(),  # 아직 매핑 안 된 Speaker ID들
+
+        # Speech API 스트리밍 세션 (지속적 연결)
+        "speech_session": None,  # SpeechStreamingSession 객체
+        "websocket": websocket,  # WebSocket 객체 (콜백에서 사용)
     }
     active_sessions[session_id] = session
 
@@ -68,16 +88,26 @@ async def websocket_record(websocket: WebSocket):
 
             if message_type == "start":
                 # 녹음 시작
-                session["language"] = data.get("language", "ko")
+                session["language"] = data.get("language", "ko-KR")
                 session["speaker"] = data.get("speaker", settings.default_speaker)
                 session["meeting_title"] = data.get("meeting_title", "제목없음")
                 session["start_time"] = datetime.now()
+
+                # 참석자 명단 파싱
+                participants_str = data.get("participants", "")
+                if participants_str:
+                    session["participant_names"] = [
+                        name.strip()
+                        for name in participants_str.split(",")
+                        if name.strip()
+                    ]
 
                 logger.info(
                     f"녹음 시작: session_id={session_id}, "
                     f"speaker={session['speaker']}, "
                     f"language={session['language']}, "
-                    f"meeting_title={session['meeting_title']}"
+                    f"meeting_title={session['meeting_title']}, "
+                    f"participants={session['participant_names']}"
                 )
 
                 # 템플릿 기반 회의록 시트 생성
@@ -101,6 +131,74 @@ async def websocket_record(websocket: WebSocket):
 
                     logger.info(f"SUCCESS: Sheet created - ID={session['sheet_id']}, Link={session['sheet_link']}")
 
+                    # Speech API 스트리밍 세션 생성 및 시작
+                    speaker_count = len(session["participant_names"]) if session["participant_names"] else None
+                    session["speech_session"] = await speech_service.create_streaming_session(
+                        language_code=session["language"],
+                        speaker_count=speaker_count
+                    )
+
+                    # 결과 콜백 정의
+                    async def on_speech_result(result: dict):
+                        """Speech API 결과를 받아서 처리"""
+                        text = result["text"]
+                        speaker_id = result["speaker_id"]
+
+                        logger.info(f"인식 결과: Speaker {speaker_id}: {text}")
+
+                        # 화자 매핑 확인
+                        speaker_mapping = session["speaker_mapping"]
+
+                        if speaker_id not in speaker_mapping:
+                            # 아직 매핑 안 됨 → 클라이언트에 요청
+                            session["unmapped_speakers"].add(speaker_id)
+
+                            await websocket.send_json({
+                                "type": "speaker_mapping_required",
+                                "speaker_id": speaker_id,
+                                "text": text,
+                                "available_names": [
+                                    name for name in session["participant_names"]
+                                    if name not in speaker_mapping.values()
+                                ]
+                            })
+
+                            # 임시로 Speaker X로 저장
+                            current_speaker = f"Speaker {speaker_id}"
+                        else:
+                            # 이미 매핑됨
+                            current_speaker = speaker_mapping[speaker_id]
+
+                        # 시트에 기록
+                        last_speaker = session.get("last_speaker_name")
+
+                        sheet_result = await sheets_service.append_transcription_with_speaker(
+                            sheet_id=session["sheet_id"],
+                            tab_name=session["tab_name"],
+                            text=text,
+                            current_speaker=current_speaker,
+                            last_speaker=last_speaker
+                        )
+
+                        # 세션 업데이트
+                        session["last_speaker_id"] = speaker_id
+                        session["last_speaker_name"] = current_speaker
+                        session["transcription_parts"].append(text)
+
+                        # 클라이언트에 확인
+                        await websocket.send_json({
+                            "type": "transcription_recorded",
+                            "text": text,
+                            "speaker": current_speaker,
+                            "speaker_changed": sheet_result["speaker_changed"],
+                            "row": sheet_result["row"]
+                        })
+
+                    # 콜백 저장 (첫 오디오 도착 시 스트림 시작)
+                    session["speech_callback"] = on_speech_result
+                    session["speech_started"] = False  # 스트림 시작 여부
+                    logger.info("Speech API 스트리밍 세션 준비 완료 (첫 오디오 대기 중)")
+
                     response_data = {
                         "type": "status",
                         "message": "녹음이 시작되었습니다",
@@ -123,13 +221,70 @@ async def websocket_record(websocket: WebSocket):
                     })
 
             elif message_type == "audio":
-                # 오디오 청크 수신
-                # 실제 구현에서는 이 부분에서 Google Speech Streaming API를 호출할 수 있습니다
-                # 현재는 버퍼에 저장만 합니다
-                audio_data = data.get("data")
-                if audio_data:
-                    session["audio_buffer"].append(audio_data)
-                    print(f"오디오 청크 수신: session_id={session_id}, chunks={len(session['audio_buffer'])}")
+                # 오디오 청크 수신 (Base64 인코딩됨)
+                audio_base64 = data.get("data")
+                import sys
+                print(f"[AUDIO] Received audio message, base64 length: {len(audio_base64) if audio_base64 else 0}", file=sys.stderr, flush=True)
+
+                if audio_base64 and session.get("speech_session"):
+                    # Base64 디코딩
+                    try:
+                        audio_bytes = base64.b64decode(audio_base64)
+                        print(f"[AUDIO] Decoded audio chunk: {len(audio_bytes)} bytes", file=sys.stderr, flush=True)
+
+                        # 첫 오디오 도착 시 스트림 시작
+                        if not session.get("speech_started"):
+                            print("[START] First audio arrived! Starting Speech API stream...", file=sys.stderr, flush=True)
+                            session["speech_started"] = True
+
+                            # 중요: 첫 오디오를 먼저 큐에 추가 (타임아웃 방지)
+                            await session["speech_session"].send_audio(audio_bytes)
+                            print(f"[OK] First audio added to queue: {len(audio_bytes)} bytes", file=sys.stderr, flush=True)
+
+                            # 스트림 시작 (비동기 태스크로 실행)
+                            speech_callback = session.get("speech_callback")
+                            if speech_callback:
+                                await session["speech_session"].start_immediately(speech_callback)
+                            else:
+                                print("[ERROR] speech_callback not found!", file=sys.stderr, flush=True)
+                        else:
+                            # 이후 오디오는 계속 큐에 추가
+                            await session["speech_session"].send_audio(audio_bytes)
+
+                    except Exception as e:
+                        print(f"[ERROR] Audio processing failed: {e}", file=sys.stderr, flush=True)
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    print(f"[WARNING] Audio processing skipped - base64={bool(audio_base64)}, session={bool(session.get('speech_session'))}", file=sys.stderr, flush=True)
+
+            elif message_type == "speaker_mapping":
+                # 화자 매핑
+                speaker_id = data.get("speaker_id")
+                speaker_name = data.get("speaker_name")
+
+                if speaker_id is not None and speaker_name:
+                    session["speaker_mapping"][speaker_id] = speaker_name
+                    session["unmapped_speakers"].discard(speaker_id)
+
+                    logger.info(f"화자 매핑: Speaker {speaker_id} = {speaker_name}")
+
+                    # 레이블 업데이트
+                    try:
+                        await sheets_service.update_speaker_labels(
+                            sheet_id=session["sheet_id"],
+                            tab_name=session["tab_name"],
+                            old_label=f"Speaker {speaker_id}",
+                            new_label=speaker_name
+                        )
+                    except Exception as e:
+                        logger.error(f"레이블 업데이트 실패: {e}")
+
+                    await websocket.send_json({
+                        "type": "speaker_mapped",
+                        "speaker_id": speaker_id,
+                        "speaker_name": speaker_name
+                    })
 
             elif message_type == "transcription":
                 # 클라이언트가 직접 변환한 텍스트를 전송하는 경우
@@ -189,7 +344,6 @@ async def websocket_record(websocket: WebSocket):
 
                 # 세션 정리
                 session["transcription_parts"].clear()
-                session["audio_buffer"].clear()
 
             else:
                 await websocket.send_json({
@@ -209,8 +363,16 @@ async def websocket_record(websocket: WebSocket):
         except:
             pass
     finally:
-        # 세션 정리
+        # Speech API 스트리밍 세션 종료
         if session_id in active_sessions:
+            session = active_sessions[session_id]
+            if session.get("speech_session"):
+                try:
+                    await session["speech_session"].stop()
+                    logger.info(f"Speech API 스트림 종료: session_id={session_id}")
+                except Exception as e:
+                    logger.error(f"Speech API 스트림 종료 실패: {e}")
+
             del active_sessions[session_id]
         print(f"세션 정리 완료: session_id={session_id}")
 

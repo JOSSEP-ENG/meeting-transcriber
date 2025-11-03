@@ -19,6 +19,28 @@ class Settings(BaseSettings):
     app_log_level: str = Field(default="info", alias="APP_LOG_LEVEL")
     default_speaker: str = Field(default="Unknown", alias="DEFAULT_SPEAKER")
 
+    # Speech API 설정
+    speech_language: str = Field(
+        default="ko-KR",
+        alias="SPEECH_LANGUAGE",
+        description="음성 인식 언어"
+    )
+    speech_encoding: str = Field(
+        default="WEBM_OPUS",
+        alias="SPEECH_ENCODING",
+        description="오디오 인코딩 형식"
+    )
+    speech_sample_rate: int = Field(
+        default=48000,
+        alias="SPEECH_SAMPLE_RATE",
+        description="오디오 샘플링 레이트"
+    )
+    enable_speaker_diarization: bool = Field(
+        default=True,
+        alias="ENABLE_SPEAKER_DIARIZATION",
+        description="화자 분리 활성화"
+    )
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

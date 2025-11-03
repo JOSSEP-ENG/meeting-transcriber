@@ -8,7 +8,7 @@ app = FastAPI(title="Meeting Transcriber MVP")
 # CORS 설정 (프론트엔드와 통신을 위해 필요)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],  # Vue/React 개발 서버
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://localhost:5176", "http://localhost:3000"],  # Vue/React 개발 서버
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -11,6 +11,9 @@ class WebSocketService {
     this.messageHandlers = {
       status: [],
       transcription_received: [],
+      transcription_recorded: [],  // 추가: 화자 정보 포함된 녹취 기록
+      speaker_mapping_required: [],  // 추가: 화자 매핑 요청
+      speaker_mapped: [],  // 추가: 화자 매핑 완료
       completed: [],
       error: [],
     };
@@ -97,11 +100,12 @@ class WebSocketService {
   /**
    * 회의 녹음 시작
    * @param {object} options - 녹음 옵션
-   * @param {string} options.language - 언어 코드 (기본값: ko)
+   * @param {string} options.language - 언어 코드 (기본값: ko-KR)
    * @param {string} options.speaker - 화자 이름
    * @param {string} options.meeting_title - 회의 제목
+   * @param {string} options.participants - 참석자 명단 (쉼표로 구분)
    */
-  startRecording({ language = 'ko', speaker = '', meeting_title = '' } = {}) {
+  startRecording({ language = 'ko-KR', speaker = '', meeting_title = '', participants = '' } = {}) {
     if (!this.isConnected) {
       throw new Error('WebSocket이 연결되지 않았습니다');
     }
@@ -111,6 +115,7 @@ class WebSocketService {
       language,
       speaker,
       meeting_title,
+      participants,  // 추가
     };
 
     this.ws.send(JSON.stringify(message));
@@ -149,6 +154,43 @@ class WebSocketService {
 
     this.ws.send(JSON.stringify(message));
     console.log('녹음 종료 요청');
+  }
+
+  /**
+   * 일반 메시지 전송
+   * @param {object} message - 메시지 객체
+   */
+  send(message) {
+    if (!this.isConnected) {
+      throw new Error('WebSocket이 연결되지 않았습니다');
+    }
+
+    this.ws.send(JSON.stringify(message));
+  }
+
+  /**
+   * 오디오 데이터 전송 (Base64)
+   * @param {string} audioBase64 - Base64 인코딩된 오디오 데이터
+   */
+  sendAudio(audioBase64) {
+    this.send({
+      type: 'audio',
+      data: audioBase64,
+    });
+  }
+
+
+  /**
+   * 화자 매핑 전송
+   * @param {number} speakerId - Speaker ID
+   * @param {string} speakerName - 화자 이름
+   */
+  sendSpeakerMapping(speakerId, speakerName) {
+    this.send({
+      type: 'speaker_mapping',
+      speaker_id: speakerId,
+      speaker_name: speakerName,
+    });
   }
 
   /**

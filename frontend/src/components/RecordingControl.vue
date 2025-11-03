@@ -6,17 +6,6 @@
       <!-- 회의 정보 입력 폼 -->
       <div class="form-section" v-if="!isRecording">
         <div class="form-group">
-          <label for="speaker">화자 이름:</label>
-          <input
-            id="speaker"
-            v-model="formData.speaker"
-            type="text"
-            placeholder="이름을 입력하세요"
-            class="input-field"
-          />
-        </div>
-
-        <div class="form-group">
           <label for="meetingTitle">회의 제목:</label>
           <input
             id="meetingTitle"
@@ -28,12 +17,43 @@
         </div>
 
         <div class="form-group">
+          <label>참석자 (순서대로 Speaker 1, 2, 3...으로 매핑됩니다):</label>
+          <div class="participants-container">
+            <div
+              v-for="(participant, index) in participants"
+              :key="index"
+              class="participant-row"
+            >
+              <div class="participant-number">{{ index + 1 }}</div>
+              <input
+                v-model="participants[index]"
+                type="text"
+                :placeholder="`참석자 ${index + 1} 이름`"
+                class="input-field participant-input"
+              />
+              <button
+                v-if="participants.length > 2"
+                @click="removeParticipant(index)"
+                class="btn-remove"
+                type="button"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+          <button @click="addParticipant" class="btn-add" type="button">
+            + 참석자 추가
+          </button>
+          <small class="help-text">순서대로 Speaker 1, Speaker 2... 로 자동 매핑됩니다</small>
+        </div>
+
+        <div class="form-group">
           <label for="language">언어:</label>
           <select id="language" v-model="formData.language" class="input-field">
-            <option value="ko">한국어</option>
-            <option value="en">영어</option>
-            <option value="ja">일본어</option>
-            <option value="zh">중국어</option>
+            <option value="ko-KR">한국어</option>
+            <option value="en-US">영어</option>
+            <option value="ja-JP">일본어</option>
+            <option value="zh-CN">중국어</option>
           </select>
         </div>
       </div>
@@ -45,7 +65,6 @@
           <span class="recording-text">녹음 중...</span>
         </div>
         <div class="status-info">
-          <p><strong>화자:</strong> {{ formData.speaker }}</p>
           <p v-if="formData.meeting_title">
             <strong>회의:</strong> {{ formData.meeting_title }}
           </p>
@@ -53,12 +72,19 @@
         </div>
 
         <!-- 실시간 텍스트 표시 -->
-        <div class="transcription-display" v-if="currentTranscription">
+        <div class="transcription-display" v-if="transcriptions.length > 0">
           <h3>인식된 텍스트:</h3>
           <div class="transcription-list">
-            <p v-for="(text, index) in transcriptions" :key="index" class="transcription-item">
-              {{ text }}
-            </p>
+            <div
+              v-for="item in transcriptions"
+              :key="item.id"
+              class="transcription-item"
+            >
+              <strong v-if="item.speaker_changed" class="speaker-tag">
+                [{{ item.speaker }}]
+              </strong>
+              <span>{{ item.text }}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -94,9 +120,39 @@
           </a>
         </div>
         <p><strong>녹취 개수:</strong> {{ completedData.transcription_count }}개</p>
-        <div class="transcription-result">
-          <h4>전체 녹취록:</h4>
-          <p>{{ completedData.transcription }}</p>
+      </div>
+
+      <!-- 화자 매핑 모달 -->
+      <div v-if="speakerMappingRequest" class="modal-overlay" @click.self="closeModal">
+        <div class="modal">
+          <h3>화자 확인</h3>
+
+          <div class="speaker-text">
+            "{{ speakerMappingRequest.text }}"
+          </div>
+
+          <p>이 발화는 누구의 발화인가요?</p>
+
+          <select v-model="selectedSpeakerName" class="speaker-select">
+            <option value="">선택하세요</option>
+            <option
+              v-for="name in speakerMappingRequest.available_names"
+              :key="name"
+              :value="name"
+            >
+              {{ name }}
+            </option>
+          </select>
+
+          <div class="modal-buttons">
+            <button
+              @click="confirmSpeakerMapping"
+              :disabled="!selectedSpeakerName"
+              class="btn btn-primary"
+            >
+              확인
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -119,16 +175,29 @@ export default {
     const completedData = ref(null);
 
     const formData = ref({
-      speaker: '',
       meeting_title: '',
-      language: 'ko',
+      language: 'ko-KR',
     });
 
-    const transcriptions = ref([]);
-    const currentTranscription = ref('');
+    // 참석자 목록 (배열로 관리)
+    const participants = ref(['', '']);
 
-    // 브라우저 음성 인식 (Web Speech API)
-    let recognition = null;
+    const transcriptions = ref([]);
+    const speakerMappingRequest = ref(null);
+    const selectedSpeakerName = ref('');
+
+    // 참석자 추가
+    const addParticipant = () => {
+      participants.value.push('');
+    };
+
+    // 참석자 제거
+    const removeParticipant = (index) => {
+      participants.value.splice(index, 1);
+    };
+
+    // MediaRecorder 관련
+    let mediaRecorder = null;
 
     // 포맷된 녹음 시간
     const formattedDuration = computed(() => {
@@ -136,56 +205,6 @@ export default {
       const seconds = recordingDuration.value % 60;
       return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
     });
-
-    // 브라우저 음성 인식 초기화
-    const initSpeechRecognition = () => {
-      if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-        showMessage('이 브라우저는 음성 인식을 지원하지 않습니다', 'error');
-        return null;
-      }
-
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const recognitionInstance = new SpeechRecognition();
-
-      recognitionInstance.continuous = true;
-      recognitionInstance.interimResults = false;
-      recognitionInstance.lang = formData.value.language === 'ko' ? 'ko-KR' :
-                                 formData.value.language === 'en' ? 'en-US' :
-                                 formData.value.language === 'ja' ? 'ja-JP' : 'zh-CN';
-
-      recognitionInstance.onresult = (event) => {
-        const last = event.results.length - 1;
-        const transcript = event.results[last][0].transcript;
-
-        console.log('음성 인식 결과:', transcript);
-        transcriptions.value.push(transcript);
-        currentTranscription.value = transcript;
-
-        // WebSocket으로 텍스트 전송
-        websocketService.sendTranscription(transcript);
-      };
-
-      recognitionInstance.onerror = (event) => {
-        console.error('음성 인식 에러:', event.error);
-        if (event.error !== 'no-speech') {
-          showMessage(`음성 인식 오류: ${event.error}`, 'error');
-        }
-      };
-
-      recognitionInstance.onend = () => {
-        console.log('음성 인식 종료');
-        // 녹음 중이면 자동으로 재시작
-        if (isRecording.value) {
-          try {
-            recognitionInstance.start();
-          } catch (e) {
-            console.log('음성 인식 재시작 실패:', e);
-          }
-        }
-      };
-
-      return recognitionInstance;
-    };
 
     // 메시지 표시
     const showMessage = (message, type = 'info') => {
@@ -196,14 +215,35 @@ export default {
       }, 5000);
     };
 
-    // WebSocket 메시지 핸들러 등록
+    // WebSocket 이벤트 핸들러 등록
     const setupWebSocketHandlers = () => {
       websocketService.on('status', (data) => {
         showMessage(data.message, 'success');
       });
 
-      websocketService.on('transcription_received', (data) => {
-        console.log('텍스트 수신 확인:', data.text);
+      websocketService.on('transcription_recorded', (data) => {
+        transcriptions.value.push({
+          id: Date.now() + Math.random(),
+          text: data.text,
+          speaker: data.speaker,
+          speaker_changed: data.speaker_changed
+        });
+        console.log('녹취 기록:', data.speaker, data.text);
+      });
+
+      websocketService.on('speaker_mapping_required', (data) => {
+        speakerMappingRequest.value = {
+          speaker_id: data.speaker_id,
+          text: data.text,
+          available_names: data.available_names
+        };
+        console.log('화자 매핑 필요:', data.speaker_id);
+      });
+
+      websocketService.on('speaker_mapped', (data) => {
+        console.log('화자 매핑 완료:', data.speaker_id, '→', data.speaker_name);
+        speakerMappingRequest.value = null;
+        selectedSpeakerName.value = '';
       });
 
       websocketService.on('completed', (data) => {
@@ -218,10 +258,18 @@ export default {
       });
     };
 
+
     // 녹음 시작
     const startRecording = async () => {
-      if (!formData.value.speaker.trim()) {
-        showMessage('화자 이름을 입력해주세요', 'error');
+      if (!formData.value.meeting_title.trim()) {
+        showMessage('회의 제목을 입력해주세요', 'error');
+        return;
+      }
+
+      // 참석자 검증 (최소 1명의 이름이 입력되어야 함)
+      const validParticipants = participants.value.filter(p => p.trim() !== '');
+      if (validParticipants.length === 0) {
+        showMessage('최소 1명의 참석자를 입력해주세요', 'error');
         return;
       }
 
@@ -234,14 +282,53 @@ export default {
         await websocketService.connect();
         setupWebSocketHandlers();
 
-        // 녹음 시작 요청
-        websocketService.startRecording(formData.value);
+        // 회의 시작 요청 (참석자 배열을 쉼표로 구분된 문자열로 변환)
+        const participantsStr = participants.value
+          .filter(p => p.trim() !== '')
+          .join(', ');
 
-        // 음성 인식 시작
-        recognition = initSpeechRecognition();
-        if (recognition) {
-          recognition.start();
-        }
+        websocketService.startRecording({
+          meeting_title: formData.value.meeting_title,
+          participants: participantsStr,
+          language: formData.value.language
+        });
+
+        // 마이크 권한 요청
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,  // 모노
+            sampleRate: 48000  // Google 권장
+          }
+        });
+
+        // MediaRecorder 생성
+        mediaRecorder = new MediaRecorder(stream, {
+          mimeType: 'audio/webm;codecs=opus'
+        });
+
+        // 오디오 청크 수신 이벤트 (즉시 전송)
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            // Blob을 Base64로 변환하여 즉시 전송
+            const reader = new FileReader();
+
+            reader.onloadend = () => {
+              // data:audio/webm;base64,ABC123... 형식
+              // → ABC123... 부분만 추출
+              const base64Data = reader.result.split(',')[1];
+
+              // 서버로 즉시 전송 (Speech API 스트림에 직접 전달됨)
+              websocketService.sendAudio(base64Data);
+
+              console.log('오디오 청크 즉시 전송:', event.data.size, 'bytes');
+            };
+
+            reader.readAsDataURL(event.data);
+          }
+        };
+
+        // 500ms마다 청크 생성 및 즉시 전송
+        mediaRecorder.start(500);
 
         isRecording.value = true;
         isConnecting.value = false;
@@ -256,14 +343,37 @@ export default {
 
     // 녹음 종료
     const stopRecording = () => {
-      if (recognition) {
-        recognition.stop();
-        recognition = null;
+      // MediaRecorder 정지
+      if (mediaRecorder) {
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach(track => track.stop());
       }
 
-      websocketService.endRecording();
+      // 즉시 녹음 중 UI 종료
+      isRecording.value = false;
       stopDurationTimer();
+
+      // 서버에 종료 알림 (약간의 지연으로 마지막 청크 전송 보장)
+      setTimeout(() => {
+        websocketService.endRecording();
+      }, 500);
+
       showMessage('회의를 종료하고 저장 중입니다...', 'info');
+    };
+
+    // 화자 매핑 확인
+    const confirmSpeakerMapping = () => {
+      if (!selectedSpeakerName.value) return;
+
+      websocketService.sendSpeakerMapping(
+        speakerMappingRequest.value.speaker_id,
+        selectedSpeakerName.value
+      );
+    };
+
+    // 모달 닫기
+    const closeModal = () => {
+      // 모달 배경 클릭 시에는 닫지 않음 (사용자가 명시적으로 선택해야 함)
     };
 
     // 녹음 시간 타이머 시작
@@ -284,10 +394,14 @@ export default {
 
     // 컴포넌트 언마운트 시 정리
     onUnmounted(() => {
-      if (recognition) {
-        recognition.stop();
+      if (mediaRecorder) {
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach(track => track.stop());
       }
       stopDurationTimer();
+      if (processingInterval) {
+        clearInterval(processingInterval);
+      }
       websocketService.disconnect();
     });
 
@@ -295,14 +409,20 @@ export default {
       isRecording,
       isConnecting,
       formData,
+      participants,
+      addParticipant,
+      removeParticipant,
       statusMessage,
       messageType,
       formattedDuration,
       transcriptions,
-      currentTranscription,
       completedData,
+      speakerMappingRequest,
+      selectedSpeakerName,
       startRecording,
       stopRecording,
+      confirmSpeakerMapping,
+      closeModal,
     };
   },
 };
@@ -358,6 +478,87 @@ h1 {
 .input-field:focus {
   outline: none;
   border-color: #667eea;
+}
+
+.help-text {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.875rem;
+  color: #888;
+}
+
+/* 참석자 입력 영역 */
+.participants-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.participant-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.participant-number {
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 0.9rem;
+  flex-shrink: 0;
+}
+
+.participant-input {
+  flex: 1;
+  margin: 0;
+}
+
+.btn-add {
+  width: 100%;
+  padding: 0.75rem;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+  margin-bottom: 0.5rem;
+}
+
+.btn-add:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.btn-remove {
+  width: 32px;
+  height: 32px;
+  background: #ff4757;
+  color: white;
+  border: none;
+  border-radius: 50%;
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: all 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.btn-remove:hover {
+  background: #ff3838;
+  transform: scale(1.1);
 }
 
 .status-section {
@@ -430,12 +631,17 @@ h1 {
 }
 
 .transcription-item {
-  padding: 0.75rem;
+  padding: 0.5rem;
   background: #f0f0f0;
   border-radius: 6px;
-  margin: 0;
   color: #333;
-  line-height: 1.5;
+  line-height: 1.6;
+}
+
+.speaker-tag {
+  color: #667eea;
+  font-weight: 600;
+  margin-right: 0.5rem;
 }
 
 .button-section {
@@ -540,21 +746,84 @@ h1 {
   box-shadow: 0 4px 12px rgba(66, 133, 244, 0.5);
 }
 
-.transcription-result {
-  margin-top: 1rem;
-  padding: 1rem;
+/* 화자 매핑 모달 */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
   background: white;
-  border-radius: 8px;
+  padding: 2rem;
+  border-radius: 12px;
+  max-width: 500px;
+  width: 90%;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
 }
 
-.transcription-result h4 {
-  color: #555;
-  margin-bottom: 0.5rem;
-}
-
-.transcription-result p {
+.modal h3 {
+  margin-bottom: 1rem;
   color: #333;
+}
+
+.speaker-text {
+  background: #f0f0f0;
+  padding: 1rem;
+  border-radius: 8px;
+  margin: 1rem 0;
+  font-style: italic;
+  color: #555;
   line-height: 1.6;
-  white-space: pre-wrap;
+}
+
+.speaker-select {
+  width: 100%;
+  padding: 0.75rem;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 1rem;
+  margin: 1rem 0;
+}
+
+.speaker-select:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
+.modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 0.75rem 2rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

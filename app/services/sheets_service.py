@@ -1,11 +1,14 @@
 from datetime import datetime
 from typing import List, Optional
+import logging
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 from app.config.settings import settings
 from app.models.transcribe import SheetRecord
+
+logger = logging.getLogger(__name__)
 
 
 class GoogleSheetsService:
@@ -208,31 +211,55 @@ class GoogleSheetsService:
             Exception: API 호출 실패 시
         """
         try:
+            import sys
             service = self._get_service()
+            # 템플릿 시트에서 탭 복사
             template_sheet_id = settings.google_template_sheet_id
+            print(f"[SHEET] Using template sheet ID: {template_sheet_id}", file=sys.stderr, flush=True)
 
-            # 1. 템플릿 시트의 첫 번째 워크시트(탭) ID 가져오기
+            # 1. 시트의 모든 탭 정보 가져오기
+            print(f"[SHEET] Fetching sheet metadata...", file=sys.stderr, flush=True)
             sheet_metadata = service.spreadsheets().get(
                 spreadsheetId=template_sheet_id
             ).execute()
+            print(f"[SHEET] Sheet metadata fetched successfully", file=sys.stderr, flush=True)
 
             sheets = sheet_metadata.get('sheets', [])
             if not sheets:
                 raise Exception("템플릿 시트에 워크시트가 없습니다")
 
-            # 첫 번째 탭을 템플릿으로 사용
-            template_tab_id = sheets[0]['properties']['sheetId']
-            template_tab_name = sheets[0]['properties']['title']
+            # "템플릿" 또는 "Template" 이름을 가진 탭 찾기
+            # 없으면 첫 번째 탭을 템플릿으로 사용
+            template_tab_id = None
+            template_tab_name = None
 
-            print(f"DEBUG: Template tab ID: {template_tab_id}, Name: {template_tab_name}")
+            for sheet in sheets:
+                sheet_title = sheet['properties']['title']
+                if sheet_title in ['템플릿', 'Template', 'TEMPLATE', 'template']:
+                    template_tab_id = sheet['properties']['sheetId']
+                    template_tab_name = sheet_title
+                    print(f"[OK] Template tab found: {template_tab_name} (ID: {template_tab_id})")
+                    break
 
-            # 2. 새 탭 이름 생성
+            # 템플릿 탭을 못 찾으면 첫 번째 탭 사용
+            if template_tab_id is None:
+                template_tab_id = sheets[0]['properties']['sheetId']
+                template_tab_name = sheets[0]['properties']['title']
+                print(f"[WARNING] Template tab not found, using first tab: {template_tab_name} (ID: {template_tab_id})")
+
+            print(f"[SHEET] Template tab ID: {template_tab_id}, Name: {template_tab_name}", file=sys.stderr, flush=True)
+
+            # 2. 새 탭 이름 생성 (중복 방지를 위해 타임스탬프 추가)
+            print(f"[SHEET] Creating new tab name...", file=sys.stderr, flush=True)
             if not meeting_date:
                 meeting_date = datetime.now().strftime("%Y-%m-%d")
 
-            new_tab_name = f"{meeting_date} {meeting_title}"
+            # 마이크로초까지 포함한 타임스탬프로 중복 방지
+            timestamp = datetime.now().strftime("%H%M%S-%f")[:15]  # HHMMSS-mmmmmm 형식
+            new_tab_name = f"{meeting_date} {meeting_title} ({timestamp})"
 
             # 3. 템플릿 탭 복사
+            print(f"[SHEET] Copying template tab '{template_tab_name}' to '{new_tab_name}'...", file=sys.stderr, flush=True)
             copy_request = {
                 "duplicateSheet": {
                     "sourceSheetId": template_tab_id,
@@ -248,7 +275,7 @@ class GoogleSheetsService:
             # 복사된 탭 ID 가져오기
             new_tab_id = response['replies'][0]['duplicateSheet']['properties']['sheetId']
 
-            print(f"SUCCESS: Tab copied - ID: {new_tab_id}, Name: {new_tab_name}")
+            print(f"[SUCCESS] Tab copied - ID: {new_tab_id}, Name: {new_tab_name}", file=sys.stderr, flush=True)
 
             # 4. 회의 메타 정보 입력 (행2, 행3)
             # 날짜/시간 포맷팅
@@ -282,7 +309,7 @@ class GoogleSheetsService:
                 body={"data": updates, "valueInputOption": "RAW"}
             ).execute()
 
-            print(f"SUCCESS: Metadata updated for tab: {new_tab_name}")
+            print(f"[SUCCESS] Metadata updated for tab: {new_tab_name}", file=sys.stderr, flush=True)
 
             # 5. 웹 링크 생성 (특정 탭으로 이동)
             web_link = f"https://docs.google.com/spreadsheets/d/{template_sheet_id}/edit#gid={new_tab_id}"
@@ -358,6 +385,176 @@ class GoogleSheetsService:
 
         except Exception as e:
             raise Exception(f"녹취 내용 추가 실패: {str(e)}")
+
+    async def append_transcription_with_speaker(
+        self,
+        sheet_id: str,
+        tab_name: str,
+        text: str,
+        current_speaker: str,
+        last_speaker: Optional[str],
+        start_row: int = 13
+    ) -> dict:
+        """
+        화자 정보와 함께 녹취 내용 기록
+
+        포맷 규칙:
+        1. 화자가 바뀌면: 빈 줄 + [화자명] 텍스트
+        2. 같은 화자: 텍스트만 (화자명 생략)
+
+        Args:
+            sheet_id: Google Sheets 파일 ID
+            tab_name: 워크시트 탭 이름
+            text: 녹취 텍스트
+            current_speaker: 현재 화자 ("홍길동" 또는 "Speaker 1")
+            last_speaker: 이전 화자 (None이면 첫 발화)
+            start_row: 시작 행 번호 (기본값: 13)
+
+        Returns:
+            {
+                "row": 기록된 행 번호,
+                "speaker": 화자명,
+                "speaker_changed": 화자 변경 여부,
+                "formatted_text": 실제 기록된 텍스트
+            }
+        """
+        try:
+            service = self._get_service()
+
+            # 1. 현재 마지막 행 찾기
+            range_to_read = f"'{tab_name}'!C{start_row}:C1000"
+            result = service.spreadsheets().values().get(
+                spreadsheetId=sheet_id,
+                range=range_to_read
+            ).execute()
+
+            values = result.get("values", [])
+            current_row = start_row + len(values)
+
+            # 2. 화자 변경 감지
+            speaker_changed = (last_speaker != current_speaker)
+
+            # 3. 기록할 데이터 준비
+            rows_to_append = []
+
+            # 화자가 바뀌고 첫 발화가 아니면 빈 줄 추가
+            if speaker_changed and last_speaker is not None:
+                rows_to_append.append([""])
+
+            # 텍스트 포맷팅
+            if speaker_changed:
+                formatted_text = f"[{current_speaker}] {text}"
+            else:
+                formatted_text = text
+
+            rows_to_append.append([formatted_text])
+
+            # 4. 시트에 기록
+            start_write_row = current_row
+            end_write_row = current_row + len(rows_to_append) - 1
+
+            range_to_update = f"'{tab_name}'!C{start_write_row}:C{end_write_row}"
+
+            service.spreadsheets().values().update(
+                spreadsheetId=sheet_id,
+                range=range_to_update,
+                valueInputOption="RAW",
+                body={"values": rows_to_append}
+            ).execute()
+
+            logger.info(
+                f"녹취 기록 완료 - 화자: {current_speaker}, "
+                f"행: {start_write_row}, 변경: {speaker_changed}"
+            )
+
+            return {
+                "row": start_write_row,
+                "speaker": current_speaker,
+                "speaker_changed": speaker_changed,
+                "formatted_text": formatted_text
+            }
+
+        except Exception as e:
+            logger.error(f"녹취 기록 실패: {e}")
+            raise Exception(f"녹취 기록 실패: {str(e)}")
+
+    async def update_speaker_labels(
+        self,
+        sheet_id: str,
+        tab_name: str,
+        old_label: str,
+        new_label: str,
+        start_row: int = 13
+    ) -> int:
+        """
+        화자 레이블 일괄 업데이트
+
+        예: "[Speaker 1]" → "[홍길동]"
+
+        Args:
+            sheet_id: Google Sheets 파일 ID
+            tab_name: 워크시트 탭 이름
+            old_label: 기존 레이블 ("Speaker 1")
+            new_label: 새 레이블 ("홍길동")
+            start_row: 시작 행 번호 (기본값: 13)
+
+        Returns:
+            업데이트된 행 개수
+        """
+        try:
+            service = self._get_service()
+
+            # 1. 전체 데이터 읽기
+            range_to_read = f"'{tab_name}'!C{start_row}:C1000"
+            result = service.spreadsheets().values().get(
+                spreadsheetId=sheet_id,
+                range=range_to_read
+            ).execute()
+
+            values = result.get("values", [])
+            if not values:
+                return 0
+
+            # 2. 레이블 찾아서 변경
+            updated_count = 0
+            updated_values = []
+
+            old_prefix = f"[{old_label}]"
+            new_prefix = f"[{new_label}]"
+
+            for row in values:
+                if not row:
+                    updated_values.append(row)
+                    continue
+
+                cell_value = row[0]
+
+                # "[Speaker 1] 텍스트" → "[홍길동] 텍스트"
+                if cell_value.startswith(old_prefix):
+                    new_value = cell_value.replace(old_prefix, new_prefix, 1)
+                    updated_values.append([new_value])
+                    updated_count += 1
+                else:
+                    updated_values.append(row)
+
+            # 3. 업데이트
+            if updated_count > 0:
+                range_to_update = f"'{tab_name}'!C{start_row}:C{start_row + len(updated_values) - 1}"
+
+                service.spreadsheets().values().update(
+                    spreadsheetId=sheet_id,
+                    range=range_to_update,
+                    valueInputOption="RAW",
+                    body={"values": updated_values}
+                ).execute()
+
+                logger.info(f"화자 레이블 업데이트 완료: {updated_count}개 행")
+
+            return updated_count
+
+        except Exception as e:
+            logger.error(f"레이블 업데이트 실패: {e}")
+            return 0
 
 
 # 싱글톤 인스턴스
